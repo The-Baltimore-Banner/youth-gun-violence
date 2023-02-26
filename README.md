@@ -27,11 +27,12 @@ Read the story: [Nearly one in three people shot in 2023 were 18 or under as gun
 age_range | 2015 | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023
 --- | --- | --- | --- | --- | --- | --- | --- | --- | ---
 high school teen | 8 | 6 | 14 | 6 | 7 | 5 | 6 | 20 | 29
-19 and older| 58.00 | 65 | 126 | 71 | 88 | 108 | 97 | 113 | 71
-child | 1.00 | 1.00 | 0 | 0 | 1 | 0 | 0 | 0 | 1
+19 and older| 58 | 65 | 126 | 71 | 88 | 108 | 97 | 113 | 71
+child | 1 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 1
 
 ### More high school-aged teens, 13 to 18, have been shot this school year than in any other since 2015
 age_range | 2015/2016  | 2016/2017 | 2017/2018 | 2018/2019 | 2019/2020 | 2020/2021 | 2021/2022 | 2022/2023
+--- | --- | --- | --- | --- | --- | --- | --- | --- | ---
 high school teen | 79 | 82 | 71 | 73 | 99 | 87 | 95 | 122
 19 and older | 846 | 916 | 866 | 891 | 991 | 918 | 954 | 834
 child | 10 | 6 | 3 | 5 | 5 | 2 | 4 | 2
