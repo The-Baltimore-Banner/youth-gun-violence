@@ -70,7 +70,7 @@ While reviewing this analysis, it is important to focus on the difference betwee
 
 High school-aged teens are ages 13 to 18. Eighteen-year-olds were included in an initial analysis of juvenile gunshot victims after further analysis made clear the central role schools are playing in the increase in violence. Nearly 1 in 4 juvenile gunshot victims were shot near a school this academic year, and 18-year-olds were shot near schools at similar rates as 17-year-olds. Very few children 12 and under are shot in Baltimore, and the rate is actually down significantly since 2015.
 
-a id="limitations"></a>
+<a id="limitations"></a>
 
 ## Limitations
 ### Missing entries and errors we overcame to tell this story
