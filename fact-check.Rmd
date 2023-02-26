@@ -1,0 +1,1223 @@
+---
+title: "fact-check"
+output: html_document
+date: "2023-02-22"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readr)
+library(janitor)
+library(lubridate)
+library(sf)
+library(mapview)
+library(tidycensus)
+options(digits=3)
+options(scipen=999)
+'%notin%' <- Negate('%in%')
+
+
+#does a standard group_by and count() with percentage
+grouper <- function(input_df, group_by_column, new_column_name = "n()"){
+  output_df <- input_df %>%
+    group_by(.data[[group_by_column]]) %>%
+    summarise(temp_count = n()) %>%
+    mutate(percent = temp_count/sum(temp_count)*100) %>%
+    arrange(desc(percent)) %>%
+    rename(!!new_column_name := temp_count)
+  return(output_df)
+}
+
+#group/counts every column in input dataframe
+group_count <- function(input_df, group_column_name='n()', state_filter=NA, start_col = 1){
+  column_names <- colnames(input_df)
+  if(!is.na(state_filter)){
+    input_df <- input_df %>%
+      filter(state == state_filter)
+  }
+  for (column in column_names[start_col:length(column_names)]){
+    output <- grouper(input_df, column, group_column_name)
+    print(output)
+  }
+}
+
+grouper_sum <- function(input_df, group_by_column, sum_column, new_column_name = "n()"){
+  output_df <- input_df %>%
+    group_by(.data[[group_by_column]]) %>%
+    summarise(temp_count = sum(.data[[sum_column]])) %>%
+    mutate(percent = temp_count/sum(temp_count)*100) %>%
+    arrange(desc(percent)) %>%
+    rename(!!new_column_name := temp_count)
+  return(output_df)
+  
+}
+
+#lowers case of every character column in a dataframe
+lower_df <- function(input_df){
+  names <- colnames(input_df)
+  output_df <- input_df
+  names <- colnames(output_df)
+  for (name in names){
+    if (is.character(output_df[[name]])){
+      output_df[[name]] <- tolower(output_df[[name]])
+      #print('yes')
+    } else {
+      output_df[[name]] <- output_df[[name]]
+      #print('no')
+    }
+  }
+  return(output_df)
+}
+
+
+round_df <- function(x, digits) {
+    # round all numeric variables
+    # x: data frame 
+    # digits: number of digits to round
+    numeric_columns <- sapply(x, mode) == 'numeric'
+    x[numeric_columns] <-  round(x[numeric_columns], digits)
+    x
+}
+
+```
+
+## IMPORT PART 1 CRIME VICTIMS DATABASE
+
+```{r}
+
+victims <- read_csv('data/Part_1_Crime_Data_.csv') %>%
+  #cleaning column names
+  clean_names() %>%
+  #lowering text in df
+  lower_df()%>%
+  #converting to lubridate
+  mutate(crime_date_time = ymd_hms(crime_date_time)) %>%
+  #making year month hour columns
+  mutate(year = year(crime_date_time),
+         month = month(crime_date_time),
+         hour = hour(crime_date_time),
+         date = as_date(crime_date_time, 'day')) %>%
+  #removing lat/long because there are multiples and ethnicity because it is unreliable
+  select(-x, -y, -row_id, -latitude, -longitude, -ethnicity) %>%#, -shape) %>%
+  #filtering for year
+  #filter(year >= 2011) %>%
+  #splitting geo location
+  separate(geo_location, c("latitude", "longitude"), ',') %>%
+  #removing parenthesis
+  mutate(latitude = gsub('\\(', '', latitude),
+         longitude = gsub('\\)', '', longitude)) %>%
+  #modifying ages that can't be or are very unlikely to be real
+  mutate(age = case_when(
+    age > 0 & age < 100 ~ age,
+    TRUE ~ NA_real_
+  )) %>%
+  #classifying age ranges
+  mutate(age_range = case_when(
+    age > 0 & age <= 12 ~ "child",
+    age <= 18 & age > 12 ~ "high school teen",
+    age >= 18 & age <= 25 ~ "19 to 25",
+    age >= 26 & age <= 34 ~ "26 to 34",
+    age >= 35 & age <= 50 ~ "35 to 50",
+    age > 50 & age < 75 ~ "51 to 74",
+    age >= 75 & age < 85 ~ "75 to 84",
+    age >= 85 ~ "85 to 100",
+    TRUE ~ "NA"
+  )) %>%
+  #adding high_school_age classification
+  mutate(high_school_age_range = case_when(
+    age < 19 & age > 0 ~ "high school age",
+    age >= 19 & age <= 25 ~ "19 to 25",
+    age >= 26 & age <= 34 ~ "26 to 34",
+    age >= 35 & age <= 50 ~ "35 to 50",
+    age > 50 & age < 75 ~ "51 to 74",
+    age >= 75 & age < 85 ~ "75 to 84",
+    age >= 85 ~ "85 to 100",
+    TRUE ~ "NA"
+  )) %>%
+  #classifying time of shooting
+  mutate(time_range = case_when(
+    hour <= 3 ~ "early morning",
+    hour < 12 & hour > 3 ~ "morning",
+    hour >= 12 & hour < 15 ~ "early afternoon",
+    hour >= 13 & hour < 17 ~ "after school",
+    hour >= 17 & hour < 20 ~ "evening",
+    hour >= 20 ~ "night"
+  ))  %>%
+  #labeling quarter by month
+    mutate(quarter = case_when(
+    month %in% c(1,2,3) ~ 1,
+    month %in% c(4,5,6) ~ 2,
+    month %in% c(7,8,9) ~ 3,
+    month %in% c(10,11,12) ~ 4
+  )) %>%
+  #labeling end date of each quarter for viz purposes
+  mutate(quarter_date = case_when(
+    quarter == 1 ~ ymd(paste0(year, "-3-31")),
+    quarter == 2 ~ ymd(paste0(year, "-6-30")),
+    quarter == 3 ~ ymd(paste0(year, "-9-30")),
+    quarter == 4 ~ ymd(paste0(year, "-12-31"))
+  )) %>%
+  filter(year >= 2015) %>%
+  mutate(
+    time = format(as.POSIXct(crime_date_time), format =  "%I:%M:%S %p")
+  )  %>%
+  mutate(during_or_just_after_school = case_when(
+    hour >= 7 & hour <= 18 ~ TRUE,
+    TRUE ~ FALSE
+  ))
+
+shooting_victims <- victims %>%
+  #filtering for shootings and homicides where a firearm was used
+  filter(description %in% c("shooting", "homicide")) %>%
+  filter(weapon == "firearm")
+
+```
+## MUTATE TO UNIQUE CRIME EVENTS
+
+```{r}
+
+shooting_crimes <- shooting_victims %>%
+  #grouping by distinct instance characteristics to counts crime incidents instead of victions
+  group_by(crime_date_time, location, district, neighborhood, premise, year, month, date, time_range, quarter, latitude, longitude) %>%
+  #summarising characteristics of crimes victims
+  summarise(victims = n(),
+            child_victims = sum(age_range == "child"),
+            child_homicides = sum(description == "homicide" & age_range == "child"),
+            high_school_teen_homicides = sum(description == "homicide" & age_range == "juvenile"),
+            high_school_teen_victims = sum(age_range == "high school teen"),
+            homicides = sum(description == "homicide"),
+            juvenile_homicides = sum(description == "homicide" & age_range == "juvenile"),
+            average_age = mean(age, na.rm = TRUE),
+            description = paste0(unique(description), collapse = ", "),
+            age_of_victims = paste0(age, collapse = ", "),
+            black_victims = sum(race == "black_or_african_american"),
+            white_victims = sum(race == "white"),
+            asian_victims = sum(race == "asian")
+            )
+
+years <- 2015:2023
+
+```
+
+## IMPORT SCHOOL DATABASE AND IDENTIFY PARCELS
+
+```{r}
+
+### neighborhood shapefiles for map later
+neighborhoods <- st_read("data/shapefiles/neighborhood/neighborhood.shp") %>%
+  st_transform(crs = 4326) %>%
+  clean_names() #%>%
+#  rename( 
+#    neighborhood = label)
+
+
+school_list <- read_csv("data/schoollist.csv") %>% 
+  clean_names() %>%
+  lower_df() %>%
+  ## manually editing one longitude
+  mutate(
+    address_longitude = case_when(address_longitude == "--76.559637" ~	"-76.559637",
+                                  TRUE ~ as.character(address_longitude))
+  ) 
+
+## high schools + making spatial object
+spatial_school_list <- school_list %>%
+  #filter(str_detect(official_state_grade_band, "high")) %>%
+  st_as_sf(coords = c("address_longitude", "address_latitude"),
+                        crs = 4326) %>%
+  ## putting filter up here for schools we don't care about
+  filter(
+    school_number != 875,
+    school_number != 877,
+    school_number != 878,
+    school_number != 884,
+    school_number != 897
+  )
+
+  
+parcels <- st_read("data/shapefiles/Real_Property_Information/Real_Property_Information.shp") %>%
+  st_transform(crs = 4326) %>%
+  clean_names() %>%
+  lower_df()
+
+### this makes join work for some reason
+sf_use_s2(FALSE)
+
+### check for if school_geoms are in parcel. 
+schools_with_parcels <- parcels %>%
+    st_join(spatial_school_list) 
+
+school_parcels <- schools_with_parcels %>%
+  select(school_number, school_name, address, fulladdr) %>%
+  drop_na(school_name) %>%
+  distinct(school_number, .keep_all = TRUE)
+
+# check that shapes look okay
+map <- mapview(school_parcels)+ mapview(spatial_school_list, cex = 2, color = "red")
+map
+
+### removing some schools that we're not considering because students don't leave the property (school is in a prison) or several schools are in one building, or the schools are virtual.
+# p-tech at carver vocational-technical high, p-tech at paul laurence dunbar high, p-tech at new era academy, port vlp at digital harbor, eager street academy
+
+final_parcels <- school_parcels %>%
+  filter(
+    school_number != 875,
+    school_number != 877,
+    school_number != 878,
+    school_number != 884,
+    school_number != 897
+  )
+
+## some duplicate parcels here, so distincting based on parcel address duplicates columnn (full_addr)
+final_parcels <- final_parcels %>%
+  group_by(fulladdr) %>%
+  mutate(
+    schools_at_parcel = paste0(str_to_title(school_name), collapse = ", ")
+  ) %>%
+  distinct(fulladdr, .keep_all = TRUE)
+  
+#sanity check 
+mapview(final_parcels) + mapview(spatial_school_list, cex = 2, color = "red")
+# 138 unique parcels!
+
+```
+
+
+"High-school-age teens in Baltimore continue to be shot in record numbers this year, even as overall, nonfatal shootings and homicides are down, according to an analysis by The Baltimore Banner."
+
+```{r}
+  
+for (nume in seq(1:length(years))){
+  
+  input_year <- years[nume]
+  
+  temp <- shooting_victims %>% 
+    filter(year == input_year,
+           date <= mdy(paste0("2/18/", input_year))) %>%
+    mutate(temp_high_school_age = case_when(
+      age_range %notin% c("high school teen", "child") ~ "19 and older",
+      TRUE ~ age_range
+    )) %>%
+    group_by(temp_high_school_age) %>%
+    summarise(!!paste0("x", input_year) := n()) 
+  
+  if (nrow(temp %>% filter(temp_high_school_age == "child")) == 0){
+  
+  temp <- temp %>%
+    bind_rows(data.frame(temp_high_school_age = "child", count = 0) %>%
+                rename(!!paste0("x", input_year) := count)) %>%
+    arrange(temp_high_school_age)
+  
+  }
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "high_school_teen_share", temp = (temp[2][[1]][3]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "child_share", temp = (temp[2][[1]][2]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+    
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "19_and_over_share", temp = (temp[2][[1]][1]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+  
+  if (nume == 1){
+    
+    output <- temp
+    
+  } else {
+    output <- output %>%
+      full_join(temp)
+  }
+}
+
+output[is.na(output)] <- 0
+
+raw_high_school_counts_by_year_through_feb_18 <- output %>%
+  round_df(2)
+
+
+raw_high_school_counts_by_year_through_feb_18
+
+```
+
+"Last year was a record year for children being shot in Baltimore, a disturbing trend first reported by the Banner in September. That year ended with 84 juvenile shooting victims. But since then, the situation has gotten worse."
+
+```{r}
+
+shooting_victims %>%
+  filter(age <= 17) %>%
+  group_by(year) %>%
+  count()
+
+```
+
+"January had the most high school-aged teenage victims of gun violence of any month since 2015, the first year with reliable publicly available data."
+
+```{r}
+
+shooting_crimes %>%
+  filter(high_school_teen_victims > 0) %>%
+  group_by(month, year) %>%
+  summarise(high_school_teen_victims = sum(high_school_teen_victims),
+            high_school_teen_shootings = n()) %>%
+  arrange(desc(high_school_teen_victims))
+
+```
+"The two most violent weeks since 2015 occurred this year: the first week of January and the second week of February."
+
+```{r}
+
+shooting_crimes %>%
+  mutate(week = week(date)) %>%
+  filter(high_school_teen_victims > 0) %>%
+  group_by(week, year) %>%
+  summarise(high_school_teen_victims = sum(high_school_teen_victims),
+            high_school_teen_shootings = n()) %>%
+  arrange(desc(high_school_teen_victims))
+
+```
+
+"Last year, the shootings were concentrated in the city’s Eastern District."
+
+```{r}
+
+shooting_crimes %>%
+  filter(high_school_teen_victims > 0,
+         year == 2022) %>%
+  group_by(district) %>%
+  summarise(high_school_teen_victims = sum(high_school_teen_victims),
+            high_school_teen_shootings = n()) %>%
+  arrange(desc(high_school_teen_victims))
+
+```
+
+"So far this year, the violence has spread to the Northeastern District and taken hold in the Southwestern District, which was primarily driven by a mass shooting across the street from Edmondson-Westside High School that killed one teenager and injured four."
+
+```{r}
+
+shooting_crimes %>%
+  filter(high_school_teen_victims > 0,
+         year == 2023) %>%
+  group_by(district) %>%
+  summarise(high_school_teen_victims = sum(high_school_teen_victims),
+            high_school_teen_shootings = n()) %>%
+  arrange(desc(high_school_teen_victims))
+
+```
+
+#### NEAR SCHOOLS ANALYSIS
+
+```{r}
+
+shootings <- victims %>%
+  filter(description %in% c("shooting", "homicide"),
+         weapon == "firearm") %>%
+  #mutating database of victims to database of distinct crimes
+  group_by(crime_date_time, location, district, neighborhood, race, weapon, premise, year, month, date, time_range, hour, during_or_just_after_school, quarter, longitude, latitude) %>%
+  summarise(victims = n(),
+            child_victims = sum(age_range == "child"),
+            child_homicides = sum(description == "homicide" & age_range == "child"),
+            high_school_teen_homicides = sum(description == "homicide" & age_range == "high school teen"),
+            high_school_teen_victims = sum(age_range == "high school teen"),
+            homicides = sum(description == "homicide"),
+            average_age = mean(age, na.rm = TRUE),
+            description = paste0(unique(description), collapse = ", "),
+            age_of_victims = paste0(age, collapse = ", "),
+            black_victims = sum(race == "black_or_african_american"),
+            white_victims = sum(race == "white"),
+            asian_victims = sum(race == "asian")
+            ) %>%
+  filter(longitude != "",
+         latitude != "") %>%
+  ungroup() %>%
+  mutate(academic_year = case_when(
+      date >= '2015-09-01' & date <= '2016-06-15' ~ "2015 - 2016",
+      date >= '2016-09-01' & date <= '2017-06-15' ~ "2016 - 2017",
+      date >= '2017-09-01' & date <= '2018-06-15' ~ "2017 - 2018",
+      date >= '2018-09-01' & date <= '2019-06-15' ~ "2018 - 2019",
+      date >= '2019-09-01' & date <= '2020-06-15' ~ "2019 - 2020",
+      date >= '2020-09-01' & date <= '2021-06-15' ~ "2020 - 2021",
+      date >= '2021-09-01' & date <= '2022-06-15' ~ "2021 - 2022",
+      date >= '2022-09-01' & date <= '2023-06-15' ~ "2022 - 2023"
+    )) %>%
+  mutate(
+    time = format(as.POSIXct(crime_date_time), format =  "%I:%M:%S %p")
+  )  %>%
+  st_as_sf(coords = c("longitude", "latitude"),
+                 crs = 4326,#4269, 
+                 remove = FALSE)
+
+  school_shape <- final_parcels
+
+  school_shape$school_number <- rownames(school_shape)
+
+  blocks <- 2
+  
+  distance <- blocks*100+50  
+
+near_school <- as.data.frame(st_is_within_distance(shootings, school_shape, dist = distance, sparse = FALSE)) %>%
+  clean_names() %>%
+  mutate(within = case_when(
+     v1 == TRUE ~ TRUE,
+     v2 == TRUE ~ TRUE,
+     v3 == TRUE ~ TRUE,
+     v4 == TRUE ~ TRUE,
+     v5 == TRUE ~ TRUE,
+     v6 == TRUE ~ TRUE,
+     v7 == TRUE ~ TRUE,
+     v8 == TRUE ~ TRUE,
+     v9 == TRUE ~ TRUE,
+     v10 == TRUE ~ TRUE,
+     v11 == TRUE ~ TRUE,
+     v12 == TRUE ~ TRUE,
+     v13 == TRUE ~ TRUE,
+     v14 == TRUE ~ TRUE,
+     v15 == TRUE ~ TRUE,
+     v16 == TRUE ~ TRUE,
+     v17 == TRUE ~ TRUE,
+     v18 == TRUE ~ TRUE,
+     v19 == TRUE ~ TRUE,
+     v20 == TRUE ~ TRUE,
+     v21 == TRUE ~ TRUE,
+     v22 == TRUE ~ TRUE,
+     v23 == TRUE ~ TRUE,
+     v24 == TRUE ~ TRUE,
+     v25 == TRUE ~ TRUE,
+     v26 == TRUE ~ TRUE,
+     v27 == TRUE ~ TRUE,
+     v28 == TRUE ~ TRUE,
+     v29 == TRUE ~ TRUE,
+     v30 == TRUE ~ TRUE,
+     v31 == TRUE ~ TRUE,
+     v32 == TRUE ~ TRUE,
+     v33 == TRUE ~ TRUE,
+     v34 == TRUE ~ TRUE,
+     v35 == TRUE ~ TRUE,
+     v36 == TRUE ~ TRUE,
+     v37 == TRUE ~ TRUE,
+     v38 == TRUE ~ TRUE,
+     v39 == TRUE ~ TRUE,
+     v40 == TRUE ~ TRUE,
+     v41 == TRUE ~ TRUE,
+     v42 == TRUE ~ TRUE,
+     v43 == TRUE ~ TRUE,
+     v44 == TRUE ~ TRUE,
+     v45 == TRUE ~ TRUE,
+     v46 == TRUE ~ TRUE,
+     v47 == TRUE ~ TRUE,
+     v48 == TRUE ~ TRUE,
+     v49 == TRUE ~ TRUE,
+     v50 == TRUE ~ TRUE,
+     v51 == TRUE ~ TRUE,
+     v52 == TRUE ~ TRUE,
+     v53 == TRUE ~ TRUE,
+     v54 == TRUE ~ TRUE,
+     v55 == TRUE ~ TRUE,
+     v56 == TRUE ~ TRUE,
+     v57 == TRUE ~ TRUE,
+     v58 == TRUE ~ TRUE,
+     v59 == TRUE ~ TRUE,
+     v60 == TRUE ~ TRUE,
+     v61 == TRUE ~ TRUE,
+     v62 == TRUE ~ TRUE,
+     v63 == TRUE ~ TRUE,
+     v64 == TRUE ~ TRUE,
+     v65 == TRUE ~ TRUE,
+     v66 == TRUE ~ TRUE,
+     v67 == TRUE ~ TRUE,
+     v68 == TRUE ~ TRUE,
+     v69 == TRUE ~ TRUE,
+     v70 == TRUE ~ TRUE,
+     v71 == TRUE ~ TRUE,
+     v72 == TRUE ~ TRUE,
+     v73 == TRUE ~ TRUE,
+     v74 == TRUE ~ TRUE,
+     v75 == TRUE ~ TRUE,
+     v76 == TRUE ~ TRUE,
+     v77 == TRUE ~ TRUE,
+     v78 == TRUE ~ TRUE,
+     v79 == TRUE ~ TRUE,
+     v80 == TRUE ~ TRUE,
+     v89 == TRUE ~ TRUE,
+     v90 == TRUE ~ TRUE,
+     v91 == TRUE ~ TRUE,
+     v92 == TRUE ~ TRUE,
+     v93 == TRUE ~ TRUE,
+     v94 == TRUE ~ TRUE,
+     v95 == TRUE ~ TRUE,
+     v96 == TRUE ~ TRUE,
+     v97 == TRUE ~ TRUE,
+     v98 == TRUE ~ TRUE,
+     v99 == TRUE ~ TRUE,
+     v100 == TRUE ~ TRUE,
+     v101 == TRUE ~ TRUE,
+     v102 == TRUE ~ TRUE,
+     v103 == TRUE ~ TRUE,
+     v104 == TRUE ~ TRUE,
+     v105 == TRUE ~ TRUE,
+     v106 == TRUE ~ TRUE,
+     v107 == TRUE ~ TRUE,
+     v108 == TRUE ~ TRUE,
+     v109 == TRUE ~ TRUE,
+     v110 == TRUE ~ TRUE,
+     v111 == TRUE ~ TRUE,
+     v112 == TRUE ~ TRUE,
+     v113 == TRUE ~ TRUE,
+     v114 == TRUE ~ TRUE,
+     v115 == TRUE ~ TRUE,
+     v116 == TRUE ~ TRUE,
+     v117 == TRUE ~ TRUE,
+     v118 == TRUE ~ TRUE,
+     v119 == TRUE ~ TRUE,
+     v110 == TRUE ~ TRUE,
+     v111 == TRUE ~ TRUE,
+     v112 == TRUE ~ TRUE,
+     v113 == TRUE ~ TRUE,
+     v114 == TRUE ~ TRUE,
+     v115 == TRUE ~ TRUE,
+     v116 == TRUE ~ TRUE,
+     v117 == TRUE ~ TRUE,
+     v118 == TRUE ~ TRUE,
+     v119 == TRUE ~ TRUE,
+     v120 == TRUE ~ TRUE,
+     v121 == TRUE ~ TRUE,
+     v122 == TRUE ~ TRUE,
+     v123 == TRUE ~ TRUE,
+     v124 == TRUE ~ TRUE,
+     v125 == TRUE ~ TRUE,
+     v126 == TRUE ~ TRUE,
+     v127 == TRUE ~ TRUE,
+     v128 == TRUE ~ TRUE,
+     v129 == TRUE ~ TRUE,
+     v130 == TRUE ~ TRUE,
+     v131 == TRUE ~ TRUE,
+     v132 == TRUE ~ TRUE,
+     v133 == TRUE ~ TRUE,
+     v134 == TRUE ~ TRUE,
+     v135 == TRUE ~ TRUE,
+     v136 == TRUE ~ TRUE,
+     v137 == TRUE ~ TRUE,
+     v138 == TRUE ~ TRUE,
+     TRUE ~ FALSE
+  )) %>%
+  #select(within) %>%
+  mutate(school_number = case_when(
+     v1 == TRUE ~ 1,
+     v2 == TRUE ~ 2,
+     v3 == TRUE ~ 3,
+     v4 == TRUE ~ 4,
+     v5 == TRUE ~ 5,
+     v6 == TRUE ~ 6,
+     v7 == TRUE ~ 7,
+     v8 == TRUE ~ 8,
+     v9 == TRUE ~ 9,
+     v10 == TRUE ~ 10,
+     v11 == TRUE ~ 11,
+     v12 == TRUE ~ 12,
+     v13 == TRUE ~ 13,
+     v14 == TRUE ~ 14,
+     v15 == TRUE ~ 15,
+     v16 == TRUE ~ 16,
+     v17 == TRUE ~ 17,
+     v18 == TRUE ~ 18,
+     v19 == TRUE ~ 19,
+     v20 == TRUE ~ 20,
+     v21 == TRUE ~ 21,
+     v22 == TRUE ~ 22,
+     v23 == TRUE ~ 23,
+     v24 == TRUE ~ 24,
+     v25 == TRUE ~ 25,
+     v26 == TRUE ~ 26,
+     v27 == TRUE ~ 27,
+     v28 == TRUE ~ 28,
+     v29 == TRUE ~ 29,
+     v30 == TRUE ~ 30,
+     v31 == TRUE ~ 31,
+     v32 == TRUE ~ 32,
+     v33 == TRUE ~ 33,
+     v34 == TRUE ~ 34,
+     v35 == TRUE ~ 35,
+     v36 == TRUE ~ 36,
+     v37 == TRUE ~ 37,
+     v38 == TRUE ~ 38,
+     v39 == TRUE ~ 39,
+     v40 == TRUE ~ 40,
+     v41 == TRUE ~ 41,
+     v42 == TRUE ~ 42,
+     v43 == TRUE ~ 43,
+     v44 == TRUE ~ 44,
+     v45 == TRUE ~ 45,
+     v46 == TRUE ~ 46,
+     v47 == TRUE ~ 47,
+     v48 == TRUE ~ 48,
+     v49 == TRUE ~ 49,
+     v50 == TRUE ~ 50,
+     v51 == TRUE ~ 51,
+     v52 == TRUE ~ 52,
+     v53 == TRUE ~ 53,
+     v54 == TRUE ~ 54,
+     v55 == TRUE ~ 55,
+     v56 == TRUE ~ 56,
+     v57 == TRUE ~ 57,
+     v58 == TRUE ~ 58,
+     v59 == TRUE ~ 59,
+     v60 == TRUE ~ 60,
+     v61 == TRUE ~ 61,
+     v62 == TRUE ~ 62,
+     v63 == TRUE ~ 63,
+     v64 == TRUE ~ 64,
+     v65 == TRUE ~ 65,
+     v66 == TRUE ~ 66,
+     v67 == TRUE ~ 67,
+     v68 == TRUE ~ 68,
+     v69 == TRUE ~ 69,
+     v70 == TRUE ~ 70,
+     v71 == TRUE ~ 71,
+     v72 == TRUE ~ 72,
+     v73 == TRUE ~ 73,
+     v74 == TRUE ~ 74,
+     v75 == TRUE ~ 75,
+     v76 == TRUE ~ 76,
+     v77 == TRUE ~ 77,
+     v78 == TRUE ~ 78,
+     v79 == TRUE ~ 79,
+     v80 == TRUE ~ 80,
+     v89 == TRUE ~ 89,
+     v90 == TRUE ~ 90,
+     v91 == TRUE ~ 91,
+     v92 == TRUE ~ 92,
+     v93 == TRUE ~ 93,
+     v94 == TRUE ~ 94,
+     v95 == TRUE ~ 95,
+     v96 == TRUE ~ 96,
+     v97 == TRUE ~ 97,
+     v98 == TRUE ~ 98,
+     v99 == TRUE ~ 99,
+     v100 == TRUE ~ 100,
+     v101 == TRUE ~ 101,
+     v102 == TRUE ~ 102,
+     v103 == TRUE ~ 103,
+     v104 == TRUE ~ 104,
+     v105 == TRUE ~ 105,
+     v106 == TRUE ~ 106,
+     v107 == TRUE ~ 107,
+     v108 == TRUE ~ 108,
+     v109 == TRUE ~ 109,
+     v110 == TRUE ~ 110,
+     v111 == TRUE ~ 111,
+     v112 == TRUE ~ 112,
+     v113 == TRUE ~ 113,
+     v114 == TRUE ~ 114,
+     v115 == TRUE ~ 115,
+     v116 == TRUE ~ 116,
+     v117 == TRUE ~ 117,
+     v118 == TRUE ~ 118,
+     v119 == TRUE ~ 119,
+     v110 == TRUE ~ 110,
+     v111 == TRUE ~ 111,
+     v112 == TRUE ~ 112,
+     v113 == TRUE ~ 113,
+     v114 == TRUE ~ 114,
+     v115 == TRUE ~ 115,
+     v116 == TRUE ~ 116,
+     v117 == TRUE ~ 117,
+     v118 == TRUE ~ 118,
+     v119 == TRUE ~ 119,
+     v120 == TRUE ~ 120,
+     v121 == TRUE ~ 121,
+     v122 == TRUE ~ 122,
+     v123 == TRUE ~ 123,
+     v124 == TRUE ~ 124,
+     v125 == TRUE ~ 125,
+     v126 == TRUE ~ 126,
+     v127 == TRUE ~ 127,
+     v128 == TRUE ~ 128,
+     v129 == TRUE ~ 129,
+     v130 == TRUE ~ 130,
+     v131 == TRUE ~ 131,
+     v132 == TRUE ~ 132,
+     v133 == TRUE ~ 133,
+     v134 == TRUE ~ 134,
+     v135 == TRUE ~ 135,
+     v136 == TRUE ~ 136,
+     v137 == TRUE ~ 137,
+     v138 == TRUE ~ 138,
+     TRUE ~ FALSE
+  )) %>%
+  select(within, school_number)
+
+
+near_school <- shootings %>%
+  cbind(near_school$within, near_school$school_number) %>%
+  clean_names() %>%
+  mutate(near_school_school_number = as.character(near_school_school_number)) %>%
+  filter(near_school_within == TRUE) %>%
+  filter(during_or_just_after_school == "TRUE") %>%
+  #filter(high_school_teen_victims > 0) %>%
+  #filter(description == "shooting" | 
+  #       description == "homicide") %>%
+  filter(weapon == "firearm") %>%
+  as.data.frame() %>%
+  left_join(school_shape %>%
+              select(schools_at_parcel, school_number),
+            by = c("near_school_school_number" = "school_number"))
+  
+  near_school_by_year <- near_school %>%
+    as.data.frame() %>%
+    #mutate(year_month = mdy(paste0(month, "-1-", year))) %>%
+    group_by(year) %>%
+    summarise(shootings = n(),
+              high_school_teen_victims = sum(high_school_teen_victims),
+              total_victims = sum(victims))
+  
+  near_school_academic_year <- near_school %>%
+    as.data.frame() %>%
+    #mutate(year_month = mdy(paste0(month, "-1-", year))) %>%
+    group_by(academic_year) %>%
+    summarise(shootings = n(),
+              high_school_teen_victims = sum(high_school_teen_victims),
+              total_victims = sum(victims))
+  
+  plot <- ggplot(near_school_by_year, aes(x=year, y=shootings)) +
+    geom_line() +
+    ggtitle(paste0("shootings within ", blocks, " block(s) of 31 high schools during school hours"))
+  
+  near_school_by_hour <- near_school %>%
+    mutate(crime_date_time = ymd_hms(crime_date_time))  %>%
+    mutate(year = year(crime_date_time),
+         month = month(crime_date_time),
+         hour = hour(crime_date_time)) %>%
+    group_by(hour) %>%
+    summarize(
+      count = n()
+    )
+
+### writing out two blocks for viz 
+
+clean_near_school <- near_school %>%
+  mutate(
+    location = str_to_title(location),
+    neighborhood = str_to_title(neighborhood),
+    premise = str_to_title(premise),
+    district = str_to_title(district),
+    time_range = str_to_title(time_range)
+  ) %>%
+  filter(!is.na(academic_year))
+
+clean_parcels <- final_parcels %>%
+  mutate(
+    school_name = str_to_title(school_name),
+    fulladdr = str_to_title(fulladdr),
+  )
+
+```
+
+
+"Twenty-three school-age children and young adults, ages 13 to 18, have been shot near a Baltimore City school during the school day this academic year."
+
+```{r}
+
+near_school_academic_year %>%
+  filter(academic_year == "2022 - 2023") %>%
+  select(academic_year, high_school_teen_victims)
+
+```
+
+"Winter has been especially violent. More than half of all of the victims were shot since the winter break.
+
+```{r}
+
+near_school %>%
+  filter(academic_year == "2022 - 2023") %>%
+  group_by(year) %>%
+  summarise(high_school_teen_victims = sum(high_school_teen_victims))
+
+```
+
+"Nearly 1 in 4 juvenile gunshot victims were shot near a school this academic year, and 18-year-olds were shot near schools at similar rates as 17-year-olds."
+
+```{r}
+
+#september 1 to june 15
+shooting_victims_by_school_year <- shooting_victims %>%
+  mutate(school_year = case_when(
+    date > mdy("6/15/2015") & date <= mdy("6/15/2016") ~ "2015/2016",
+    date > mdy("6/15/2016") & date <= mdy("6/15/2017") ~ "2016/2017",
+    date > mdy("6/15/2017") & date <= mdy("6/15/2018") ~ "2017/2018",
+    date > mdy("6/15/2018") & date <= mdy("6/15/2019") ~ "2018/2019",    
+    date > mdy("6/15/2019") & date <= mdy("6/15/2020") ~ "2019/2020",
+    date > mdy("6/15/2020") & date <= mdy("6/15/2021") ~ "2020/2021",
+    date > mdy("6/15/2021") & date <= mdy("6/15/2022") ~ "2021/2022",
+    date > mdy("6/15/2022") & date <= mdy("6/15/2023") ~ "2022/2023",
+    TRUE ~ "error"
+  ))
+
+school_years <- c("2015/2016", "2016/2017", "2017/2018", "2018/2019", "2019/2020", "2020/2021", "2021/2022", "2022/2023")
+
+for (nume in seq(1:length(school_years))){
+  
+  input_year <- school_years[nume]
+  
+  end_year <- str_split(input_year, "/")[[1]][2]
+  
+  temp <- shooting_victims_by_school_year %>% 
+    filter(school_year == input_year,
+           date <= mdy(paste0("2/18/", end_year))) %>%
+    mutate(temp_high_school_age = case_when(
+      age_range %notin% c("high school teen", "child") ~ "19 and older",
+      TRUE ~ age_range
+    )) %>%
+    group_by(temp_high_school_age) %>%
+    summarise(!!paste0("x", input_year) := n()) 
+  
+  if (nrow(temp %>% filter(temp_high_school_age == "child")) == 0){
+  
+  temp <- temp %>%
+    bind_rows(data.frame(temp_high_school_age = "child", count = 0) %>%
+                rename(!!paste0("x", input_year) := count)) %>%
+    arrange(temp_high_school_age)
+  
+  }
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "high_school_teen_share", temp = (temp[2][[1]][3]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "child_share", temp = (temp[2][[1]][2]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+    
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "19_and_over_share", temp = (temp[2][[1]][1]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+    
+  if (nume == 1){
+    
+    output <- temp
+    
+  } else {
+    output <- output %>%
+      full_join(temp)
+  }
+}
+
+output[is.na(output)] <- 0
+
+
+high_school_age_victims_by_school_year_thru_feb_18 <- output %>%
+  round_df(2)
+
+high_school_age_victims_by_school_year_thru_feb_18 %>%
+  clean_names() %>%
+  select(temp_high_school_age, x2022_2023) %>%
+  filter(temp_high_school_age == "high school teen")
+
+#write_csv(high_school_age_victims_by_school_year_thru_feb_18 %>%
+            #filter(boolean_high_school != "Total"), "data/output/high_school_age_victims_by_school_year_thru_feb_18.csv")
+
+```
+
+```{r}
+#high school teens shot near schools during school year, total high school teens shot since end of last school year
+(23/89)*100
+
+```
+
+"Very few children 12 and under are shot in Baltimore, and the rate is actually down significantly since 2015."
+
+```{r}
+
+shooting_victims %>%
+  filter(age_range == "child") %>%
+  group_by(year) %>%
+  count()
+
+```
+
+
+### VIZ
+
+# SHARE OVER TIME VIZ
+
+##################################################################
+### HIGH SCHOOL SHOOTING VICTIMS CALENDAR YEAR THROUGH FEB. 18 ###
+##################################################################
+
+```{r}
+  
+for (nume in seq(1:length(years))){
+  
+  input_year <- years[nume]
+  
+  temp <- shooting_victims %>% 
+    filter(year == input_year,
+           date <= mdy(paste0("2/18/", input_year))) %>%
+    mutate(temp_high_school_age = case_when(
+      age_range %notin% c("high school teen", "child") ~ "19 and older",
+      TRUE ~ age_range
+    )) %>%
+    group_by(temp_high_school_age) %>%
+    summarise(!!paste0("x", input_year) := n()) 
+  
+  if (nrow(temp %>% filter(temp_high_school_age == "child")) == 0){
+  
+  temp <- temp %>%
+    bind_rows(data.frame(temp_high_school_age = "child", count = 0) %>%
+                rename(!!paste0("x", input_year) := count)) %>%
+    arrange(temp_high_school_age)
+  
+  }
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "high_school_teen_share", temp = (temp[2][[1]][3]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "child_share", temp = (temp[2][[1]][2]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+    
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "19_and_over_share", temp = (temp[2][[1]][1]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+  
+  if (nume == 1){
+    
+    output <- temp
+    
+  } else {
+    output <- output %>%
+      full_join(temp)
+  }
+}
+
+output[is.na(output)] <- 0
+
+raw_high_school_counts_by_year_through_feb_18 <- output %>%
+  round_df(2)
+
+
+raw_high_school_counts_by_year_through_feb_18
+
+```
+
+#######################################################
+### SHOOTING VICTIMS THROUGH FEB. 15 BY SCHOOL YEAR ###
+#######################################################
+
+```{r}
+
+#september 1 to june 15
+shooting_victims_by_school_year <- shooting_victims %>%
+  mutate(school_year = case_when(
+    date > mdy("6/15/2015") & date <= mdy("6/15/2016") ~ "2015/2016",
+    date > mdy("6/15/2016") & date <= mdy("6/15/2017") ~ "2016/2017",
+    date > mdy("6/15/2017") & date <= mdy("6/15/2018") ~ "2017/2018",
+    date > mdy("6/15/2018") & date <= mdy("6/15/2019") ~ "2018/2019",    
+    date > mdy("6/15/2019") & date <= mdy("6/15/2020") ~ "2019/2020",
+    date > mdy("6/15/2020") & date <= mdy("6/15/2021") ~ "2020/2021",
+    date > mdy("6/15/2021") & date <= mdy("6/15/2022") ~ "2021/2022",
+    date > mdy("6/15/2022") & date <= mdy("6/15/2023") ~ "2022/2023",
+    TRUE ~ "error"
+  ))
+
+school_years <- c("2015/2016", "2016/2017", "2017/2018", "2018/2019", "2019/2020", "2020/2021", "2021/2022", "2022/2023")
+
+for (nume in seq(1:length(school_years))){
+  
+  input_year <- school_years[nume]
+  
+  end_year <- str_split(input_year, "/")[[1]][2]
+  
+  temp <- shooting_victims_by_school_year %>% 
+    filter(school_year == input_year,
+           date <= mdy(paste0("2/18/", end_year))) %>%
+    mutate(temp_high_school_age = case_when(
+      age_range %notin% c("high school teen", "child") ~ "19 and older",
+      TRUE ~ age_range
+    )) %>%
+    group_by(temp_high_school_age) %>%
+    summarise(!!paste0("x", input_year) := n()) 
+  
+  if (nrow(temp %>% filter(temp_high_school_age == "child")) == 0){
+  
+  temp <- temp %>%
+    bind_rows(data.frame(temp_high_school_age = "child", count = 0) %>%
+                rename(!!paste0("x", input_year) := count)) %>%
+    arrange(temp_high_school_age)
+  
+  }
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "high_school_teen_share", temp = (temp[2][[1]][3]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "child_share", temp = (temp[2][[1]][2]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+    
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "19_and_over_share", temp = (temp[2][[1]][1]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+    
+  if (nume == 1){
+    
+    output <- temp
+    
+  } else {
+    output <- output %>%
+      full_join(temp)
+  }
+}
+
+output[is.na(output)] <- 0
+
+
+high_school_age_victims_by_school_year_thru_feb_18 <- output %>%
+  round_df(2)
+
+high_school_age_victims_by_school_year_thru_feb_18
+
+```
+
+#################################################
+### SHOOTING VICTIMS BY LAST 12 MONTH PERIODS ###
+#################################################
+
+```{r}
+
+#september 1 to june 15
+shooting_victims_by_12_month_periods <- shooting_victims %>%
+  mutate(x12_month_period = case_when(
+    date > mdy("2/18/2015") & date <= mdy("2/18/2016") ~ "2015/2016",
+    date > mdy("2/18/2016") & date <= mdy("2/18/2017") ~ "2016/2017",
+    date > mdy("2/18/2017") & date <= mdy("2/18/2018") ~ "2017/2018",
+    date > mdy("2/18/2018") & date <= mdy("2/18/2019") ~ "2018/2019",    
+    date > mdy("2/18/2019") & date <= mdy("2/18/2020") ~ "2019/2020",
+    date > mdy("2/18/2020") & date <= mdy("2/18/2021") ~ "2020/2021",
+    date > mdy("2/18/2021") & date <= mdy("2/18/2022") ~ "2021/2022",
+    date > mdy("2/18/2022") & date <= mdy("2/18/2023") ~ "2022/2023",
+    TRUE ~ "error"
+  ))
+
+school_years <- c("2015/2016", "2016/2017", "2017/2018", "2018/2019", "2019/2020", "2020/2021", "2021/2022", "2022/2023")
+
+for (nume in seq(1:length(school_years))){
+  
+  input_year <- school_years[nume]
+  
+  temp <- shooting_victims_by_12_month_periods %>% 
+    filter(x12_month_period == input_year) %>%
+    mutate(temp_high_school_age = case_when(
+      age_range %notin% c("high school teen", "child") ~ "19 and older",
+      TRUE ~ age_range
+    )) %>%
+    group_by(temp_high_school_age) %>%
+    summarise(!!paste0("x", input_year) := n()) 
+  
+  if (nrow(temp %>% filter(temp_high_school_age == "child")) == 0){
+  
+  temp <- temp %>%
+    bind_rows(data.frame(temp_high_school_age = "child", count = 0) %>%
+                rename(!!paste0("x", input_year) := count)) %>%
+    arrange(temp_high_school_age)
+  
+  }
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "high_school_teen_share", temp = (temp[2][[1]][3]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "child_share", temp = (temp[2][[1]][2]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+    
+  temp <- temp%>%
+    bind_rows(data.frame(temp_high_school_age = "19_and_over_share", temp = (temp[2][[1]][1]/(temp[2][[1]][1]+temp[2][[1]][2]+temp[2][[1]][3]))*100) %>%
+                rename(!!paste0("x", input_year) := temp))
+  
+    
+  if (nume == 1){
+    
+    output <- temp
+    
+  } else {
+    output <- output %>%
+      full_join(temp)
+  }
+}
+
+output[is.na(output)] <- 0
+
+high_school_age_victims_in_last_12_month_periods <- output %>%
+  round_df(2)
+
+high_school_age_victims_in_last_12_month_periods
+
+```
+
+## BUILDING OUTPUT FOR VIZ
+
+```{r}
+
+temp <- raw_high_school_counts_by_year_through_feb_18 %>%
+  pivot_longer(names_to = "year", cols = c(x2015, x2016, x2017, x2018, x2019, x2020, x2021, x2022, x2023)) %>%
+  pivot_wider(values_from = value, names_from = temp_high_school_age) %>%
+  mutate(data_type = "Jan. 1 through Feb. 18",
+         year = gsub("x", "", year)) 
+
+
+temp2 <- high_school_age_victims_by_school_year_thru_feb_18 %>%
+  clean_names() %>%
+  pivot_longer(names_to = "year", cols = c(x2015_2016, x2016_2017, x2017_2018, x2018_2019, x2019_2020, x2020_2021, x2021_2022, x2022_2023)) %>%
+  pivot_wider(values_from = value, names_from = temp_high_school_age) %>%
+  mutate(data_type = "School year through Feb. 15",
+         year = gsub("x", "", year),
+         year = gsub("_", "/", year)) 
+
+temp3 <- high_school_age_victims_in_last_12_month_periods %>%
+  clean_names() %>%
+  pivot_longer(names_to = "year", cols = c(x2015_2016, x2016_2017, x2017_2018, x2018_2019, x2019_2020, x2020_2021, x2021_2022, x2022_2023)) %>%
+  pivot_wider(values_from = value, names_from = temp_high_school_age) %>%
+  mutate(data_type = "12-month period ending Feb. 18",
+         year = gsub("x", "", year),
+         year = gsub("_", "/", year)) 
+
+```
+
+#######################################
+### SHOOTINGS BY YEAR FOR STORY MAP ###
+#######################################
+
+```{r}
+
+for (input_year in (2015:2023)){
+  temp <- shooting_crimes %>%
+           filter(high_school_teen_victims > 0,
+                  year == input_year) %>%
+  mutate(location = str_to_title(location),
+         district = str_to_title(district),
+         neighborhood = str_to_title(neighborhood),
+         premise = str_to_title(premise),
+         time_range = str_to_title(time_range)
+         ) %>%
+    filter(!is.na(latitude),
+           !is.na(neighborhood))
+  
+  #temp <- st_as_sf(temp,
+  #                 coords = c("longitude", "latitude"),
+  #                 crs = 4326)
+  
+  #write_csv(temp, paste0("data/output/high-school-aged-victims-", input_year,".csv"))
+  
+}
+
+```
